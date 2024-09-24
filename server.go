@@ -60,6 +60,10 @@ func checkNetwork(network, address string) {
 	}
 }
 
+type Server interface {
+	Run()
+}
+
 type GrpcServer struct {
 	listener net.Listener
 	Server   *grpc.Server
