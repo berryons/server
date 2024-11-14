@@ -1,9 +1,14 @@
 package server
 
 import (
+	"context"
+	"fmt"
 	"github.com/berryons/log"
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"slices"
@@ -15,17 +20,22 @@ var (
 	supportedNetworks = []string{"unix", "tcp"}
 )
 
+type HttpProxyServerHandler func(ctx context.Context, mux *runtime.ServeMux, endpoint string, opts []grpc.DialOption) (err error)
+
 func New(
 	network, address string,
+	port int,
 	unaryServerInterceptors []grpc.UnaryServerInterceptor,
 	streamServerInterceptors []grpc.StreamServerInterceptor,
+	httpProxyHandler HttpProxyServerHandler,
 ) *GrpcServer {
+	fullAddress := fmt.Sprintf("%s:%d", address, port)
 
 	// Check Network
-	checkNetwork(network, address)
+	checkNetwork(network, fullAddress)
 
 	// Network Listener 생성.
-	listener, err := net.Listen(strings.ToLower(network), address)
+	listener, err := net.Listen(strings.ToLower(network), fullAddress)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v\n", err)
 	}
@@ -43,10 +53,25 @@ func New(
 	grpcServer := grpc.NewServer(serverOptions...)
 
 	return &GrpcServer{
-		listener: listener,
-		Server:   grpcServer,
-		network:  network,
-		address:  address,
+		listener:         listener,
+		Server:           grpcServer,
+		network:          network,
+		address:          address,
+		port:             port,
+		httpProxyHandler: httpProxyHandler,
+		proxyPort:        port + 1,
+	}
+}
+
+func RegisterHttpProxyServerHandler(f HttpProxyServerHandler, address string, port int) {
+	ctx := context.Background()
+	mux := runtime.NewServeMux()
+	options := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	}
+
+	if err := f(ctx, mux, fmt.Sprintf("%s:%d", address, port), options); err != nil {
+		log.Fatalf("failed to register Http gateway: %v", err)
 	}
 }
 
@@ -62,6 +87,7 @@ func checkNetwork(network, address string) {
 
 type Server interface {
 	Run()
+	RunHttpProxy()
 }
 
 type GrpcServer struct {
@@ -69,6 +95,11 @@ type GrpcServer struct {
 	Server   *grpc.Server
 	network  string
 	address  string
+	port     int
+
+	httpProxyHandler HttpProxyServerHandler
+	proxyPort        int
+	// TODO: Credentials
 }
 
 func (pSelf *GrpcServer) Run() {
@@ -84,11 +115,30 @@ func (pSelf *GrpcServer) Run() {
 	// Run shut down Goroutine
 	go pSelf.postDestroy(cSig)
 
-	log.Printf("Start gRPC server on %s, %s\n", pSelf.network, pSelf.address)
+	log.Printf("Start gRPC server on %s, %s\n", pSelf.network, fmt.Sprintf("%s:%d", pSelf.address, pSelf.port))
 	// Network Listener 에 등록 된 Handler 에 들어오는 연결을 수락하고,
 	// gRPC Service Handler 와 연결하는 새 연결을 생성하여 요청을 Handler 에 전달.
 	if err := pSelf.Server.Serve(pSelf.listener); err != nil {
 		log.Fatalf("Failed to serve: %v\n", err)
+	}
+}
+
+func (pSelf *GrpcServer) RunHttpProxy() {
+	proxyFullAddress := fmt.Sprintf("%s:%d", pSelf.address, pSelf.proxyPort)
+	ctx := context.Background()
+	mux := runtime.NewServeMux()
+	options := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	}
+
+	if err := pSelf.httpProxyHandler(ctx, mux, proxyFullAddress, options); err != nil {
+		log.Fatalf("failed to register Http proxy: %v", err)
+	}
+
+	log.Printf("Start HTTP proxy server on %s, %s\n", pSelf.network, proxyFullAddress)
+
+	if err := http.ListenAndServe(proxyFullAddress, mux); err != nil {
+		log.Fatalf("failed to listen and serve Http proxy server: %v", err)
 	}
 }
 
