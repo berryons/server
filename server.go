@@ -63,18 +63,6 @@ func New(
 	}
 }
 
-func RegisterHttpProxyServerHandler(f HttpProxyServerHandler, address string, port int) {
-	ctx := context.Background()
-	mux := runtime.NewServeMux()
-	options := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	}
-
-	if err := f(ctx, mux, fmt.Sprintf("%s:%d", address, port), options); err != nil {
-		log.Fatalf("failed to register Http gateway: %v", err)
-	}
-}
-
 func checkNetwork(network, address string) {
 	if len(network) == 0 || len(address) == 0 {
 		log.Fatal("Server network or address environment variable not set.")
@@ -88,6 +76,8 @@ func checkNetwork(network, address string) {
 type Server interface {
 	Run()
 	RunHttpProxy()
+	RegisterHttpProxyServerHandler(f HttpProxyServerHandler)
+	RegisterHttpProxyServerHandlerWithOption(f HttpProxyServerHandler, ctx context.Context, mux *runtime.ServeMux, opts []grpc.DialOption)
 }
 
 type GrpcServer struct {
@@ -139,6 +129,34 @@ func (pSelf *GrpcServer) RunHttpProxy() {
 
 	if err := http.ListenAndServe(proxyFullAddress, mux); err != nil {
 		log.Fatalf("failed to listen and serve Http proxy server: %v", err)
+	}
+}
+
+func (pSelf *GrpcServer) RegisterHttpProxyServerHandler(f HttpProxyServerHandler) {
+	pSelf.RegisterHttpProxyServerHandlerWithOption(f, nil, nil, nil)
+}
+
+func (pSelf *GrpcServer) RegisterHttpProxyServerHandlerWithOption(f HttpProxyServerHandler, ctx context.Context, mux *runtime.ServeMux, opts []grpc.DialOption) {
+	checkedCtx := ctx
+	checkedMux := mux
+	checkedOptions := opts
+
+	if checkedCtx == nil {
+		checkedCtx = context.Background()
+	}
+
+	if checkedMux == nil {
+		checkedMux = runtime.NewServeMux()
+	}
+
+	if checkedOptions == nil {
+		checkedOptions = []grpc.DialOption{
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		}
+	}
+
+	if err := f(checkedCtx, checkedMux, fmt.Sprintf("%s:%d", pSelf.address, pSelf.port), checkedOptions); err != nil {
+		log.Fatalf("failed to register Http gateway: %v", err)
 	}
 }
 
