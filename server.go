@@ -27,7 +27,6 @@ func New(
 	port int,
 	unaryServerInterceptors []grpc.UnaryServerInterceptor,
 	streamServerInterceptors []grpc.StreamServerInterceptor,
-	httpProxyHandler HttpProxyServerHandler,
 ) *GrpcServer {
 	fullAddress := fmt.Sprintf("%s:%d", address, port)
 
@@ -53,13 +52,13 @@ func New(
 	grpcServer := grpc.NewServer(serverOptions...)
 
 	return &GrpcServer{
-		listener:         listener,
-		Server:           grpcServer,
-		network:          network,
-		address:          address,
-		port:             port,
-		httpProxyHandler: httpProxyHandler,
-		proxyPort:        port + 1,
+		listener:      listener,
+		Server:        grpcServer,
+		network:       network,
+		address:       address,
+		port:          port,
+		httpProxyMux:  nil,
+		httpProxyPort: -1,
 	}
 }
 
@@ -75,9 +74,7 @@ func checkNetwork(network, address string) {
 
 type Server interface {
 	Run()
-	RunHttpProxy()
-	RegisterHttpProxyServerHandler(f HttpProxyServerHandler)
-	RegisterHttpProxyServerHandlerWithOption(f HttpProxyServerHandler, ctx context.Context, mux *runtime.ServeMux, opts []grpc.DialOption)
+	RegisterHttpProxyServer(httpProxyServerHandlerFunc HttpProxyServerHandler, ctx context.Context, mux *runtime.ServeMux, opts []grpc.DialOption, httpProxyPort int)
 }
 
 type GrpcServer struct {
@@ -87,9 +84,8 @@ type GrpcServer struct {
 	address  string
 	port     int
 
-	httpProxyHandler HttpProxyServerHandler
-	proxyPort        int
-	// TODO: Credentials
+	httpProxyMux  *runtime.ServeMux
+	httpProxyPort int
 }
 
 func (pSelf *GrpcServer) Run() {
@@ -105,6 +101,11 @@ func (pSelf *GrpcServer) Run() {
 	// Run shut down Goroutine
 	go pSelf.postDestroy(cSig)
 
+	// gRPC Gateway (Http Proxy) 실행.
+	if pSelf.httpProxyMux != nil && pSelf.port != pSelf.httpProxyPort && pSelf.httpProxyPort > 0 {
+		go pSelf.runHttpProxy()
+	}
+
 	log.Printf("Start gRPC server on %s, %s\n", pSelf.network, fmt.Sprintf("%s:%d", pSelf.address, pSelf.port))
 	// Network Listener 에 등록 된 Handler 에 들어오는 연결을 수락하고,
 	// gRPC Service Handler 와 연결하는 새 연결을 생성하여 요청을 Handler 에 전달.
@@ -113,30 +114,29 @@ func (pSelf *GrpcServer) Run() {
 	}
 }
 
-func (pSelf *GrpcServer) RunHttpProxy() {
-	proxyFullAddress := fmt.Sprintf("%s:%d", pSelf.address, pSelf.proxyPort)
-	ctx := context.Background()
-	mux := runtime.NewServeMux()
-	options := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+func (pSelf *GrpcServer) runHttpProxy() {
+	if pSelf.httpProxyMux == nil || pSelf.httpProxyPort == -1 {
+		log.Println("Http Proxy Server is not set")
+		return
 	}
 
-	if err := pSelf.httpProxyHandler(ctx, mux, proxyFullAddress, options); err != nil {
-		log.Fatalf("failed to register Http proxy: %v", err)
-	}
-
+	proxyFullAddress := fmt.Sprintf("%s:%d", pSelf.address, pSelf.httpProxyPort)
 	log.Printf("Start HTTP proxy server on %s, %s\n", pSelf.network, proxyFullAddress)
-
-	if err := http.ListenAndServe(proxyFullAddress, mux); err != nil {
+	if err := http.ListenAndServe(proxyFullAddress, pSelf.httpProxyMux); err != nil {
 		log.Fatalf("failed to listen and serve Http proxy server: %v", err)
 	}
 }
 
-func (pSelf *GrpcServer) RegisterHttpProxyServerHandler(f HttpProxyServerHandler) {
-	pSelf.RegisterHttpProxyServerHandlerWithOption(f, nil, nil, nil)
-}
+func (pSelf *GrpcServer) RegisterHttpProxyServer(httpProxyServerHandlerFunc HttpProxyServerHandler, ctx context.Context, mux *runtime.ServeMux, opts []grpc.DialOption, httpProxyPort int) {
+	if httpProxyServerHandlerFunc == nil {
+		log.Fatal("Http Proxy Server is nil...")
+	}
 
-func (pSelf *GrpcServer) RegisterHttpProxyServerHandlerWithOption(f HttpProxyServerHandler, ctx context.Context, mux *runtime.ServeMux, opts []grpc.DialOption) {
+	pSelf.httpProxyPort = httpProxyPort
+	if pSelf.httpProxyPort == -1 {
+		pSelf.httpProxyPort = pSelf.port + 1
+	}
+
 	checkedCtx := ctx
 	checkedMux := mux
 	checkedOptions := opts
@@ -148,6 +148,7 @@ func (pSelf *GrpcServer) RegisterHttpProxyServerHandlerWithOption(f HttpProxySer
 	if checkedMux == nil {
 		checkedMux = runtime.NewServeMux()
 	}
+	pSelf.httpProxyMux = mux
 
 	if checkedOptions == nil {
 		checkedOptions = []grpc.DialOption{
@@ -155,7 +156,7 @@ func (pSelf *GrpcServer) RegisterHttpProxyServerHandlerWithOption(f HttpProxySer
 		}
 	}
 
-	if err := f(checkedCtx, checkedMux, fmt.Sprintf("%s:%d", pSelf.address, pSelf.port), checkedOptions); err != nil {
+	if err := httpProxyServerHandlerFunc(checkedCtx, checkedMux, fmt.Sprintf("%s:%d", pSelf.address, pSelf.port), checkedOptions); err != nil {
 		log.Fatalf("failed to register Http gateway: %v", err)
 	}
 }
