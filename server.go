@@ -74,7 +74,7 @@ func checkNetwork(network, address string) {
 
 type Server interface {
 	Run()
-	RegisterHttpProxyServer(httpProxyServerHandlerFunc HttpProxyServerHandler, ctx context.Context, mux *runtime.ServeMux, opts []grpc.DialOption, httpProxyPort int)
+	RegisterHttpProxyServer(httpProxyServerHandlerFuncSlice []HttpProxyServerHandler, ctx context.Context, mux *runtime.ServeMux, opts []grpc.DialOption, httpProxyPort int)
 }
 
 type GrpcServer struct {
@@ -127,8 +127,8 @@ func (pSelf *GrpcServer) runHttpProxy() {
 	}
 }
 
-func (pSelf *GrpcServer) RegisterHttpProxyServer(httpProxyServerHandlerFunc HttpProxyServerHandler, ctx context.Context, mux *runtime.ServeMux, opts []grpc.DialOption, httpProxyPort int) {
-	if httpProxyServerHandlerFunc == nil {
+func (pSelf *GrpcServer) RegisterHttpProxyServer(httpProxyServerHandlerFuncSlice []HttpProxyServerHandler, ctx context.Context, mux *runtime.ServeMux, opts []grpc.DialOption, httpProxyPort int) {
+	if httpProxyServerHandlerFuncSlice == nil || len(httpProxyServerHandlerFuncSlice) == 0 {
 		log.Fatal("Http Proxy Server is nil...")
 	}
 
@@ -156,8 +156,10 @@ func (pSelf *GrpcServer) RegisterHttpProxyServer(httpProxyServerHandlerFunc Http
 		}
 	}
 
-	if err := httpProxyServerHandlerFunc(checkedCtx, checkedMux, fmt.Sprintf("%s:%d", pSelf.address, pSelf.port), checkedOptions); err != nil {
-		log.Fatalf("failed to register Http gateway: %v", err)
+	for _, httpProxyServerHandlerFunc := range httpProxyServerHandlerFuncSlice {
+		if err := httpProxyServerHandlerFunc(checkedCtx, checkedMux, fmt.Sprintf("%s:%d", pSelf.address, pSelf.port), checkedOptions); err != nil {
+			log.Fatalf("failed to register Http gateway: %v (%v)", err, &httpProxyServerHandlerFunc)
+		}
 	}
 }
 
